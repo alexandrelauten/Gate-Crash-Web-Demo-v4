@@ -1,0 +1,452 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"/>
+<title>Space Gates — Pass & Play (Aligned Build)</title>
+<style>
+  :root{
+    --bg:#0b0f14; --panel:#0e141d; --ui:#121821; --ink:#e6eefb; --muted:#a9b7cc;
+    --edge:#95a3b8; --ring:#b4c4d8; --p1:#f05c5c; --p2:#7aa2ff; --crash:#ff8c8c; --accent:#7aa2ff;
+    --tile:#0f1621;
+  }
+  html,body{margin:0;background:var(--bg);color:var(--ink);font-family:-apple-system,system-ui,Segoe UI,Roboto,Helvetica,Arial,sans-serif}
+  .wrap{display:grid;grid-template-columns:1fr;gap:10px;padding:10px;max-width:1200px;margin:0 auto}
+  .board{background:var(--panel);border-radius:12px;min-height:62vh;display:flex;align-items:center;justify-content:center;position:relative}
+  svg{width:100%;height:100%;max-height:88vh;touch-action:manipulation;user-select:none}
+  .ui{background:var(--panel);border-radius:12px;padding:10px;display:grid;gap:10px}
+  .row{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+  .seg{display:inline-flex;border:1px solid #2a3340;border-radius:10px;overflow:hidden}
+  .seg button{background:var(--ui);color:var(--ink);border:0;padding:8px 10px}
+  .seg button[aria-pressed="true"]{background:var(--accent);color:#001020;font-weight:600}
+  .btn{background:var(--ui);color:var(--ink);border:1px solid #2a3340;border-radius:8px;padding:8px 12px}
+  .btn.primary{background:var(--accent);color:#001020;border-color:transparent;font-weight:700}
+  .btn.warn{background:#2b1515;color:#ffd7d7;border:1px solid #5a2a2a}
+  details{background:#0d131b;border:1px solid #212b38;border-radius:10px;padding:8px}
+  summary{cursor:pointer}
+  .log{background:#0a0f16;border:1px solid #1c2532;border-radius:10px;padding:8px;max-height:180px;overflow:auto;font-family:ui-monospace,Menlo,Consolas,monospace;color:#b3c1d6;font-size:12px;white-space:pre-wrap}
+  .floating{position:absolute;inset:auto 10px 10px auto;background:#0f1621;border:1px solid #243145;color:#cfe0ff;border-radius:10px;padding:8px;max-width:320px}
+  .stat{padding:4px 6px;border-radius:6px;background:#0f1621;border:1px solid #1f2a3b}
+  .mono{font-family:ui-monospace,Menlo,Consolas,monospace;color:var(--muted)}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="board">
+    <svg id="board" viewBox="-6.6 -6.6 13.2 13.2" preserveAspectRatio="xMidYMid meet" aria-label="Space Gates Board"></svg>
+    <div class="floating">
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+        <div class="stat">Turn <span id="turn">1</span></div>
+        <div class="stat">Phase: <span id="phase_label">Allocation</span></div>
+        <div class="stat">Active: <span id="active_label">P1 &amp; P2</span></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="ui">
+    <div class="row">
+      <div class="seg" role="tablist" aria-label="Phase">
+        <button id="btnPhaseAlloc" aria-pressed="true">1) Allocation</button>
+        <button id="btnPhaseMove" aria-pressed="false">2) Movement</button>
+        <button id="btnPhaseResolve" aria-pressed="false">3) Resolve</button>
+        <button id="btnPhaseBuild" aria-pressed="false">4) Construction</button>
+      </div>
+      <button id="btnNext" class="btn primary">Next ▶</button>
+      <button id="btnReset" class="btn warn">Reset</button>
+    </div>
+
+    <div class="row">
+      <div class="seg" role="tablist" aria-label="Planner">
+        <button id="btnPlanP1" aria-pressed="true">Plan: P1</button>
+        <button id="btnPlanP2" aria-pressed="false">Plan: P2</button>
+      </div>
+      <div class="seg" role="group" aria-label="Payload">
+        <button id="minusShips">− Ship</button><button id="plusShips">+ Ship</button>
+        <button id="minusRes">− Res</button><button id="plusRes">+ Res</button>
+        <span class="mono">&nbsp;&nbsp;Payload:&nbsp;<span id="payloadShips">0</span>▲ / <span id="payloadRes">0</span>■</span>
+      </div>
+      <button id="btnAddMove" class="btn">Add Move</button>
+      <button id="btnClearMoves" class="btn">Clear Moves</button>
+    </div>
+
+    <details open>
+      <summary><b>Planned Moves</b></summary>
+      <div class="mono" id="plansList">None</div>
+    </details>
+
+    <details>
+      <summary><b>Export / Import State</b></summary>
+      <div class="row">
+        <button id="btnExport" class="btn">Export JSON</button>
+        <input type="file" id="fileImport" accept=".json"/>
+      </div>
+      <div class="mono">Single self‑contained HTML. Upload to GitHub Pages / Netlify / any static host.</div>
+    </details>
+
+    <div class="log" id="log"></div>
+  </div>
+</div>
+
+<script>
+/* ============== Precision geometry helpers (snapping) ============== */
+const SNAP = 1e-4;
+const snap = v => Math.round(v / SNAP) * SNAP;
+
+/* ============== GEOMETRY (pointy-top hexes) ============== */
+const S = 1.00;                 // hex radius (center→corner)
+const SQRT3 = Math.sqrt(3);
+function axialToPixel(q,r){     // pointy-top
+  return [ snap(S * (SQRT3*(q + r/2))), snap(S * (1.5*r)) ];
+}
+function hexVerts([cx,cy], s=S){
+  const a0 = Math.PI/6, pts=[];
+  for(let i=0;i<6;i++){
+    const a=a0+i*(Math.PI/3);
+    pts.push([ snap(cx+s*Math.cos(a)), snap(cy+s*Math.sin(a)) ]);
+  }
+  return pts;
+}
+const AX = { A:[0,0], B:[0,-1], C:[1,-1], D:[1,0], E:[0,1], F:[-1,1], G:[-1,0] };
+let CACHED_CENTERS=null, CACHED_VERTS=null;
+function centers(){
+  if(CACHED_CENTERS) return CACHED_CENTERS;
+  const C={}; for(const k in AX){ const [q,r]=AX[k]; C[k]=axialToPixel(q,r); } 
+  CACHED_CENTERS = C; return C;
+}
+function vertsFor(t){
+  if(!CACHED_VERTS) CACHED_VERTS = Object.fromEntries(Object.keys(AX).map(k=>[k,hexVerts(centers()[k])]));
+  return CACHED_VERTS[t];
+}
+
+/* ============== CONSTANTS & GRAPH ============== */
+const CRITICAL=3, P1=1, P2=2;
+const COLORS={ink:"#e6eefb",edge:"#95a3b8",ring:"#b4c4d8",p1:"#f05c5c",p2:"#7aa2ff",crash:"#ff8c8c",tile:"#0f1621"};
+const NEIGH={A:["B","C","D","E","F","G"],B:["A","C","G"],C:["A","B","D"],D:["A","C","E"],E:["A","D","F"],F:["A","E","G"],G:["A","F","B"]};
+const RING_EDGES=[["B","C"],["C","D"],["D","E"],["E","F"],["F","G"],["G","B"]];
+const CENTER_EDGES=[["A","B"],["A","C"],["A","D"],["A","E"],["A","F"],["A","G"]];
+const ALL_EDGES=[...RING_EDGES,...CENTER_EDGES];
+function eKey(u,v){ return [u,v].sort().join("-"); }
+const svg=document.getElementById("board");
+
+/* ============== STATE ============== */
+let state={
+  turn:1, phase:"alloc", planningFor:P1,
+  payload:{ships:0,res:0,from:null,to:null},
+  tiles:{
+    A:{owner:null,ships:0,res:0,removed:false},
+    B:{owner:P2,ships:2,res:0,removed:false},
+    C:{owner:P2,ships:2,res:0,removed:false},
+    D:{owner:P1,ships:2,res:0,removed:false},
+    E:{owner:P1,ships:2,res:0,removed:false},
+    F:{owner:P1,ships:2,res:0,removed:false},
+    G:{owner:P2,ships:2,res:0,removed:false},
+  },
+  edges:Object.fromEntries(ALL_EDGES.map(([u,v])=>[eKey(u,v),{charge:0,towards:null,crashed:false}])),
+  plans:{1:[],2:[]}, log:[]
+};
+
+/* ============== SVG HELPERS ============== */
+function clearSVG(){ while(svg.firstChild) svg.removeChild(svg.firstChild); }
+function make(tag, attrs={}, parent=svg){
+  const n = document.createElementNS("http://www.w3.org/2000/svg", tag);
+  for(const [k,v] of Object.entries(attrs)) n.setAttribute(k,v);
+  parent.appendChild(n); return n;
+}
+
+/* Pick the true shared edge between hex u and v */
+function sharedEdge(u,v){
+  const Cu = centers()[u], Cv = centers()[v];
+  const uv = [Cv[0]-Cu[0], Cv[1]-Cu[1]];
+  const poly = vertsFor(u);
+  let best=null, bestDot=-Infinity;
+  for(let i=0;i<6;i++){
+    const a=poly[i], b=poly[(i+1)%6];
+    const ex=b[0]-a[0], ey=b[1]-a[1];
+    const nx=-ey, ny=ex;                     // outward-ish normal
+    const dot = nx*uv[0] + ny*uv[1];
+    if(dot>bestDot){ bestDot=dot; best=[a,b]; }
+  }
+  return best;
+}
+
+/* ============== DRAW ============== */
+function drawBoard(){
+  const C=centers(); clearSVG();
+
+  // Tiles: fill only
+  for(const t of Object.keys(C)){
+    const pts = vertsFor(t).map(p=>p.join(",")).join(" ");
+    make("polygon",{points:pts,fill:COLORS.tile});
+  }
+
+  // Grid edges: single stroke per shared edge
+  const grid = make("g",{stroke:COLORS.edge,"stroke-width":"0.06","vector-effect":"non-scaling-stroke","stroke-linecap":"square",fill:"none"});
+  for(const [u,v] of ALL_EDGES){
+    const [a,b] = sharedEdge(u,v);
+    make("line",{x1:a[0],y1:a[1],x2:b[0],y2:b[1]},grid);
+  }
+
+  // Click targets on top (invisible hex overlays)
+  for(const t of Object.keys(C)){
+    const pts = vertsFor(t).map(p=>p.join(",")).join(" ");
+    const poly = make("polygon",{points:pts,fill:"transparent"});
+    poly.dataset.tile=t; poly.style.cursor="pointer";
+    poly.addEventListener("click",()=>onTileClick(t));
+  }
+
+  // Planets, letters, counters
+  const rPlanet=0.55*S, letterRaise=0.26*S, triHalf=0.18*S, sqHalf=0.16*S, offset=0.24*S;
+  for(const t of Object.keys(C)){
+    const [cx,cy]=C[t]; const T=state.tiles[t]; if(T.removed) continue;
+    const ownerColor = T.owner===P1?COLORS.p1: T.owner===P2?COLORS.p2: COLORS.ink;
+    make("text",{x:cx,y:cy-rPlanet-letterRaise,"text-anchor":"middle",dy:".35em",fill:ownerColor,"font-size":(0.46*S),"font-weight":"700","font-family":"-apple-system, BlinkMacSystemFont, 'SF Pro Text', Arial"}).textContent=t;
+    if(t!=="A"){ make("circle",{cx,cy,r:rPlanet,fill:"none",stroke:COLORS.ring,"stroke-width":"0.06","vector-effect":"non-scaling-stroke"}); }
+    // ▲ ships (left of center)
+    const lcx = cx - offset;
+    make("path",{d:`M ${lcx-triHalf},${cy+triHalf} L ${lcx},${cy-triHalf} L ${lcx+triHalf},${cy+triHalf} Z`,fill:COLORS.ink});
+    make("text",{x:lcx+0.22*S,y:cy,dy:".35em",fill:COLORS.ink,"font-size":(0.36*S),"font-family":"ui-monospace, Menlo, Consolas, monospace","text-anchor":"start"}).textContent=String(T.ships);
+    // ■ resources (right of center)
+    const rcx = cx + offset;
+    make("rect",{x:(rcx - sqHalf),y:(cy - sqHalf),width:(2*sqHalf),height:(2*sqHalf),fill:COLORS.ink});
+    make("text",{x:rcx+0.22*S,y:cy,dy:".35em",fill:COLORS.ink,"font-size":(0.36*S),"font-family":"ui-monospace, Menlo, Consolas, monospace","text-anchor":"start"}).textContent=String(T.res);
+  }
+
+  // Gates (dot/arrows/X) at true midpoints of shared edges
+  for(const [u,v] of ALL_EDGES){
+    const [a,b] = sharedEdge(u,v);
+    const mid = [ snap((a[0]+b[0])/2), snap((a[1]+b[1])/2) ];
+    const st = state.edges[eKey(u,v)];
+    if(st.crashed){
+      const r=0.30*S;
+      make("line",{x1:mid[0]-r,y1:mid[1]-r,x2:mid[0]+r,y2:mid[1]+r,stroke:COLORS.crash,"stroke-width":"0.10","vector-effect":"non-scaling-stroke"});
+      make("line",{x1:mid[0]-r,y1:mid[1]+r,x2:mid[0]+r,y2:mid[1]-r,stroke:COLORS.crash,"stroke-width":"0.10","vector-effect":"non-scaling-stroke"});
+    }else if(st.charge===0 || !st.towards){
+      make("circle",{cx:mid[0],cy:mid[1],r:0.11*S,fill:COLORS.ink});
+    }else{
+      const towardsV = (st.towards===v);
+      drawEdgeArrows(u,v, towardsV, Math.min(Math.abs(st.charge),3));
+    }
+  }
+
+  // Planned move overlays
+  drawPlanOverlays();
+
+  // HUD
+  document.getElementById("turn").textContent=state.turn;
+  document.getElementById("phase_label").textContent=phaseName(state.phase);
+  document.getElementById("active_label").textContent=(state.phase==="move"?("P"+state.planningFor):"P1 & P2");
+  refreshPlansList();
+}
+
+function drawEdgeArrows(u,v, towardsV, count){
+  const C=centers(); const p1=C[u], p2=C[v];
+  const mx=snap((p1[0]+p2[0])/2), my=snap((p1[1]+p2[1])/2);
+  const vx=p2[0]-p1[0], vy=p2[1]-p1[1]; const L=Math.hypot(vx,vy), ux=vx/L, uy=vy/L;
+  const dir=towardsV?1:-1, px=-uy, py=ux;
+  const spacing=0.16*S, base=0.70*S, head=0.25*S, headW=0.22*S;
+  const start=-(count-1)/2;
+  for(let i=0;i<count;i++){
+    const sx=mx + (start+i)*spacing*px, sy=my + (start+i)*spacing*py;
+    const ax=snap(sx - dir*ux*base/2), ay=snap(sy - dir*uy*base/2);
+    const bx=snap(sx + dir*ux*base/2), by=snap(sy + dir*uy*base/2);
+    make("line",{x1:ax,y1:ay,x2:bx,y2:by,stroke:COLORS.ink,"stroke-width":"0.06","vector-effect":"non-scaling-stroke"});
+    const hx=bx, hy=by;
+    const lx=snap(hx - dir*ux*head + px*headW/2), ly=snap(hy - dir*uy*head - py*headW/2);
+    const rx=snap(hx - dir*ux*head - px*headW/2), ry=snap(hy - dir*uy*head - py*headW/2);
+    make("polygon",{points:`${hx},${hy} ${lx},${ly} ${rx},${ry}`,fill:COLORS.ink});
+  }
+}
+
+function phaseName(p){ return p==="alloc"?"Allocation": p==="move"?"Movement": p==="resolve"?"Resolve": "Construction"; }
+
+/* ============== INTERACTION ============== */
+function onTileClick(t){
+  if(state.phase!=="move") return;
+  const pay=state.payload;
+  if(pay.from===null){ pay.from=t; }
+  else if(pay.to===null){
+    if(!NEIGH[pay.from].includes(t)){ log(`Not adjacent: ${pay.from} → ${t}`); return; }
+    pay.to=t;
+  }else{ pay.from=t; pay.to=null; }
+  highlightSelection();
+}
+function highlightSelection(){
+  drawBoard(); const C=centers(); const {from,to}=state.payload;
+  if(from){ make("circle",{cx:C[from][0],cy:C[from][1],r:0.75*S,fill:"none",stroke:"#ffd67a","stroke-width":"0.08","vector-effect":"non-scaling-stroke"}); }
+  if(to){   make("circle",{cx:C[to][0],cy:C[to][1],r:0.75*S,fill:"none",stroke:"#9cffb0","stroke-width":"0.08","vector-effect":"non-scaling-stroke"}); }
+}
+
+/* ============== LOG + PLANS ============== */
+function log(s){ state.log.push(s); const el=document.getElementById("log"); el.textContent=state.log.slice(-250).join("\n"); el.scrollTop=el.scrollHeight; }
+function refreshPlansList(){
+  const pl1=state.plans[1].map(m=>`P1: ${m.ships}▲ ${m.res}■ ${m.from}→${m.to}`).join("\n")||"—";
+  const pl2=state.plans[2].map(m=>`P2: ${m.ships}▲ ${m.res}■ ${m.from}→${m.to}`).join("\n")||"—";
+  document.getElementById("plansList").textContent=`P1\n${pl1}\n\nP2\n${pl2}`;
+}
+function resetPayload(){ state.payload={ships:0,res:0,from:null,to:null}; updatePayloadUI(); highlightSelection(); }
+function updatePayloadUI(){ document.getElementById("payloadShips").textContent=state.payload.ships; document.getElementById("payloadRes").textContent=state.payload.res; }
+function addMove(){
+  const p=state.planningFor, pay=state.payload;
+  if(!pay.from||!pay.to){ log("Select origin and destination."); return; }
+  if(pay.ships<=0 && pay.res<=0){ log("Payload is empty."); return; }
+  if(state.tiles[pay.from].ships<pay.ships || state.tiles[pay.from].res<pay.res){ log("Not enough units on origin tile."); return; }
+  state.plans[p].push({from:pay.from,to:pay.to,ships:pay.ships,res:pay.res}); log(`P${p} plans: ${pay.ships}▲ ${pay.res}■ ${pay.from}→${pay.to}`); resetPayload(); drawBoard();
+}
+function clearMoves(){ state.plans[1]=[]; state.plans[2]=[]; log("Cleared all planned moves."); drawBoard(); }
+function setPlanner(p){
+  state.planningFor=p;
+  document.getElementById("btnPlanP1").setAttribute("aria-pressed", p===1?"true":"false");
+  document.getElementById("btnPlanP2").setAttribute("aria-pressed", p===2?"true":"false");
+  drawBoard();
+}
+
+/* ============== PHASES ============== */
+function setPhase(ph){
+  state.phase=ph;
+  document.getElementById("btnPhaseAlloc").setAttribute("aria-pressed", ph==="alloc"?"true":"false");
+  document.getElementById("btnPhaseMove").setAttribute("aria-pressed", ph==="move"?"true":"false");
+  document.getElementById("btnPhaseResolve").setAttribute("aria-pressed", ph==="resolve"?"true":"false");
+  document.getElementById("btnPhaseBuild").setAttribute("aria-pressed", ph==="build"?"true":"false");
+  drawBoard();
+}
+function nextPhase(){
+  if(state.phase==="alloc"){ autoAllocate(); setPhase("move"); }
+  else if(state.phase==="move"){ setPhase("resolve"); }
+  else if(state.phase==="resolve"){ resolveAll(); setPhase("build"); }
+  else{ endTurn(); }
+}
+function endTurn(){ state.turn+=1; state.plans={1:[],2:[]}; resetPayload(); setPhase("alloc"); log(`— Turn ${state.turn} —`); }
+
+/* Allocation */
+function autoAllocate(){
+  const addOn=Object.fromEntries(Object.keys(AX).map(t=>[t,0]));
+  for(const t in AX){ const T=state.tiles[t]; if(T.removed) continue; if(t!=="A" && T.owner) addOn[t]+=1; }
+  for(const [u,v] of RING_EDGES){
+    const e=state.edges[eKey(u,v)]; if(e.crashed) continue;
+    const Tu=state.tiles[u], Tv=state.tiles[v];
+    if(Tu.owner && Tu.owner===Tv.owner){ const pick=u<v?u:v; addOn[pick]+=1; }
+  }
+  let tot=0; for(const t in addOn){ if(addOn[t]>0){ state.tiles[t].res+=addOn[t]; tot+=addOn[t]; } }
+  log(`Allocation: +${tot} resources.`);
+}
+
+/* Resolution */
+function resolveAll(){
+  const intents=[]; for(const p of [1,2]) for(const m of state.plans[p]) intents.push({player:p,...m});
+  for(const it of intents){ state.tiles[it.from].ships-=it.ships; state.tiles[it.from].res-=it.res; }
+  const destMap={}; for(const it of intents){ (destMap[it.to]??=[]).push(it); }
+  const contested=[];
+  for(const [dest,arr] of Object.entries(destMap)){
+    const owners=new Set(arr.map(a=>a.player)); const destOwner=state.tiles[dest].owner; const onlyP=owners.size===1?arr[0].player:null;
+    if(owners.size===1 && (!destOwner || destOwner===onlyP)){
+      const totalS=arr.reduce((s,a)=>s+a.ships,0), totalR=arr.reduce((s,a)=>s+a.res,0);
+      const fromSample=arr[0].from;
+      if(!applyGate(fromSample,dest,totalS+totalR)){ log(`Gate crashed on ${fromSample}↔${dest}; ${totalS}▲ ${totalR}■ lost.`); }
+      else{ state.tiles[dest].ships+=totalS; state.tiles[dest].res+=totalR; state.tiles[dest].owner=state.tiles[dest].ships>0?onlyP:state.tiles[dest].owner; log(`Uncontested arrival at ${dest}: +${totalS}▲ +${totalR}■ to P${onlyP}.`); }
+    }else{ contested.push({dest,arr}); }
+  }
+  for(const pack of contested){
+    const dest=pack.dest; const groups={1:{ships:0,res:0,from:[]},2:{ships:0,res:0,from:[]}};
+    for(const it of pack.arr){ groups[it.player].ships+=it.ships; groups[it.player].res+=it.res; groups[it.player].from.push(it.from); }
+    const defOwner=state.tiles[dest].owner; if(defOwner){ groups[defOwner].ships+=state.tiles[dest].ships; }
+    const res=battle(groups[1].ships,groups[2].ships); const surv1=res.s1, surv2=res.s2; let winner=null; if(surv1>0&&surv2===0) winner=1; if(surv2>0&&surv1===0) winner=2;
+    if(winner){
+      const w=winner, atkArr=pack.arr.filter(a=>a.player===w);
+      const defenderShips=(defOwner===w)? state.tiles[dest].ships : 0;
+      const survivingShips=(w===1?surv1:surv2)-defenderShips;
+      const totalAtkRes=atkArr.reduce((s,a)=>s+a.res,0);
+      let remainingUnits=Math.max(0, survivingShips+totalAtkRes);
+      for(const it of atkArr){
+        if(remainingUnits<=0) break;
+        const share=Math.min(remainingUnits, it.ships+it.res);
+        if(!applyGate(it.from,dest,share)){ log(`Gate crashed on ${it.from}↔${dest} during contested entry; ${share} units lost.`); }
+        remainingUnits-=share;
+      }
+      const totalRes=groups[1].res+groups[2].res+state.tiles[dest].res;
+      state.tiles[dest].ships=(w===1?surv1:surv2); state.tiles[dest].res=totalRes; state.tiles[dest].owner=w;
+      log(`Combat at ${dest}: P1 ${groups[1].ships}▲ vs P2 ${groups[2].ships}▲ → survivors P1:${surv1}, P2:${surv2}. Winner: P${w}.`);
+    }else{
+      const totalRes=groups[1].res+groups[2].res+state.tiles[dest].res;
+      state.tiles[dest].res=totalRes; state.tiles[dest].ships=0; log(`Combat at ${dest}: mutual destruction. Control remains P${state.tiles[dest].owner||"?"}.`);
+    }
+  }
+  for(const t in AX){
+    if(t==="A") continue;
+    const adj=NEIGH[t]; const allCrashed=adj.every(n=>state.edges[eKey(t,n)].crashed);
+    if(allCrashed && !state.tiles[t].removed){ state.tiles[t].removed=true; state.tiles[t].ships=0; state.tiles[t].res=0; log(`Tile ${t} removed (all gates crashed).`); }
+  }
+  state.plans={1:[],2:[]}; drawBoard();
+}
+
+function battle(s1,s2){
+  let A=Array.from({length:s1},(_,i)=>({id:"A"+(i+1)}));
+  let B=Array.from({length:s2},(_,i)=>({id:"B"+(i+1)}));
+  let round=1;
+  while(A.length>0 && B.length>0){
+    const m=Math.min(A.length,B.length), pairs=Array.from({length:m},(_,i)=>[A[i],B[i]]);
+    const SA=[], SB=[];
+    for(const [a,b] of pairs){
+      const ra=1+Math.floor(Math.random()*6), rb=1+Math.floor(Math.random()*6);
+      if(ra>rb) SA.push(a); else if(rb>ra) SB.push(b); else { SA.push(a); SB.push(b); }
+    }
+    if(A.length>B.length) SA.push(...A.slice(B.length));
+    if(B.length>A.length) SB.push(...B.slice(A.length));
+    A=SA; B=SB; if(++round>64) break;
+  }
+  return {s1:A.length, s2:B.length};
+}
+
+function applyGate(u,v,units){
+  const e=state.edges[eKey(u,v)]; if(e.crashed) return false;
+  const towards=v;
+  if(e.towards===null){ if(units>CRITICAL){ e.crashed=true; return false; } e.towards=towards; e.charge=units; return true; }
+  if(e.towards===towards){ if(e.charge+units>CRITICAL){ e.crashed=true; return false; } e.charge+=units; return true; }
+  const delta=e.charge-units;
+  if(delta<0){ const over=-delta; if(over>CRITICAL){ e.crashed=true; return false; } e.towards=towards; e.charge=over; return true; }
+  e.charge=delta; if(e.charge===0) e.towards=null; return true;
+}
+
+/* ============== UI ============== */
+document.getElementById("btnPhaseAlloc").onclick=()=>setPhase("alloc");
+document.getElementById("btnPhaseMove").onclick=()=>setPhase("move");
+document.getElementById("btnPhaseResolve").onclick=()=>setPhase("resolve");
+document.getElementById("btnPhaseBuild").onclick=()=>setPhase("build");
+document.getElementById("btnNext").onclick=nextPhase;
+document.getElementById("btnReset").onclick=()=>{ if(confirm("Reset board to initial state?")) location.reload(); };
+document.getElementById("btnPlanP1").onclick=()=>setPlanner(1);
+document.getElementById("btnPlanP2").onclick=()=>setPlanner(2);
+document.getElementById("minusShips").onclick=()=>{ state.payload.ships=Math.max(0,state.payload.ships-1); updatePayloadUI(); };
+document.getElementById("plusShips").onclick=()=>{ state.payload.ships=Math.min(99,state.payload.ships+1); updatePayloadUI(); };
+document.getElementById("minusRes").onclick=()=>{ state.payload.res=Math.max(0,state.payload.res-1); updatePayloadUI(); };
+document.getElementById("plusRes").onclick=()=>{ state.payload.res=Math.min(99,state.payload.res+1); updatePayloadUI(); };
+document.getElementById("btnAddMove").onclick=addMove;
+document.getElementById("btnClearMoves").onclick=clearMoves;
+document.getElementById("btnExport").onclick=()=>{
+  const blob=new Blob([JSON.stringify(state,null,2)],{type:"application/json"});
+  const url=URL.createObjectURL(blob); const a=document.createElement("a"); a.href=url; a.download=`spacegates_state_turn${state.turn}.json`; a.click();
+  setTimeout(()=>URL.revokeObjectURL(url),1000);
+};
+document.getElementById("fileImport").onchange=(e)=>{
+  const f=e.target.files[0]; if(!f) return;
+  const rd=new FileReader(); rd.onload=()=>{ try{ state=JSON.parse(rd.result); CACHED_CENTERS=null; CACHED_VERTS=null; drawBoard(); log("State imported."); }catch{ alert("Invalid JSON"); } };
+  rd.readAsText(f);
+};
+function drawPlanOverlays(){
+  const C=centers(); const g=make("g",{"stroke-dasharray":"0.18,0.18","stroke-width":"0.06","fill":"none","vector-effect":"non-scaling-stroke"});
+  for(const p of [1,2]) for(const m of state.plans[p]){ const col=p===1?COLORS.p1:COLORS.p2; make("line",{x1:C[m.from][0],y1:C[m.from][1],x2:C[m.to][0],y2:C[m.to][1],stroke:col},g); }
+}
+function setPlanner(p){
+  state.planningFor=p;
+  document.getElementById("btnPlanP1").setAttribute("aria-pressed", p===1?"true":"false");
+  document.getElementById("btnPlanP2").setAttribute("aria-pressed", p===2?"true":"false");
+  drawBoard();
+}
+
+/* Start */
+function phaseName(p){ return p==="alloc"?"Allocation": p==="move"?"Movement": p==="resolve"?"Resolve": "Construction"; }
+function log(s){ state.log.push(s); const el=document.getElementById("log"); el.textContent=state.log.slice(-250).join("\n"); el.scrollTop=el.scrollHeight; }
+drawBoard();
+log("Aligned build: single-stroked grid, snapped coordinates, robust shared-edges, centered text with dy=.35em.");
+</script>
+</body>
+</html>
